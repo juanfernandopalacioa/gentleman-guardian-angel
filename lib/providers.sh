@@ -243,6 +243,135 @@ validate_provider() {
 }
 
 # ============================================================================
+# Provider List Parsing (Phase 2 — Fallback Chain)
+# ============================================================================
+
+# Parse comma-separated PROVIDER into an ordered array.
+# Usage: parse_provider_list "$PROVIDER" array_name
+# Fills the caller array via nameref (bash 4.3+).
+# Trims whitespace, drops empty segments.
+parse_provider_list() {
+  local raw="$1"
+  local -n _out="$2"
+  local IFS=','
+  local segment
+
+  _out=()
+  for segment in $raw; do
+    # Trim leading/trailing whitespace via parameter expansion
+    segment="${segment#"${segment%%[![:space:]]*}"}"
+    segment="${segment%"${segment##*[![:space:]]}"}"
+    [[ -z "$segment" ]] && continue
+    _out+=("$segment")
+  done
+}
+
+# ============================================================================
+# Error Classification (Phase 2 — Fallback Chain)
+# ============================================================================
+
+# Classify a provider error as TRANSIENT or CONFIG.
+# Usage: classify_provider_error <exit_code> <combined_output>
+# Prints: TRANSIENT or CONFIG
+#
+# Classification rules (design §Interfaces / Contracts):
+#   CONFIG patterns (win on conflict):
+#     - empty API key, MINIMAX_API_KEY, API key, not authenticated
+#     - HTTP 401, 403
+#     - invalid model, requires a model, Unknown provider
+#   TRANSIENT (default):
+#     - exit 124, 126, 127
+#     - HTTP 429, 500, 502, 503
+#     - connection reset/refused, timeout, rate limit
+#     - unknown errors
+classify_provider_error() {
+  local code="$1"
+  local output="$2"
+
+  # CONFIG patterns — checked first so they win on conflict
+  if [[ "$output" =~ (API\ key|MINIMAX_API_KEY|not\ authenticated|Unknown\ provider|requires\ a\ model|Invalid.*model|401|403) ]]; then
+    echo "CONFIG"
+    return
+  fi
+
+  # TRANSIENT by exit code
+  case "$code" in
+    124|126|127)
+      echo "TRANSIENT"
+      return
+      ;;
+  esac
+
+  # TRANSIENT by output patterns
+  if [[ "$output" =~ (429|500|502|503|connection\ (reset|refused)|timed\ out|timeout|rate.?limit|Failed\ to\ connect) ]]; then
+    echo "TRANSIENT"
+    return
+  fi
+
+  # Unknown → TRANSIENT (conservative default)
+  echo "TRANSIENT"
+}
+
+# ============================================================================
+# Fallback Dispatch Wrapper (Phase 2 — Fallback Chain)
+# ============================================================================
+
+# Execute providers in order, advancing on TRANSIENT, aborting on CONFIG.
+# Usage: execute_with_fallback <prompt> <timeout> <chain_array_name>
+# Returns: 0 on success; last exit code on exhaustion or CONFIG abort.
+execute_with_fallback() {
+  local prompt="$1"
+  local timeout="$2"
+  local -n _chain="$3"
+  local chain_len="${#_chain[@]}"
+  local last_exit=1
+  local last_output=""
+  local provider
+  local i
+
+  for (( i=0; i<chain_len; i++ )); do
+    provider="${_chain[$i]}"
+
+    # Validate before executing
+    if ! validate_provider "$provider"; then
+      echo "↻ Provider '$provider' validation failed (CONFIG), aborting." >&2
+      return 1
+    fi
+
+    # Execute with timeout
+    last_output=$(execute_provider_with_timeout "$provider" "$prompt" "$timeout")
+    last_exit=$?
+
+    # Success → return immediately
+    if [[ $last_exit -eq 0 ]]; then
+      echo "$last_output"
+      return 0
+    fi
+
+    # Classify the failure
+    local error_class
+    error_class=$(classify_provider_error "$last_exit" "$last_output")
+
+    if [[ "$error_class" == "CONFIG" ]]; then
+      echo "↻ Provider '$provider' config error, aborting." >&2
+      echo "$last_output"
+      return 1
+    fi
+
+    # TRANSIENT → log and try next
+    local next_provider=""
+    if [[ $(( i + 1 )) -lt $chain_len ]]; then
+      next_provider="${_chain[$(( i + 1 ))]}"
+    fi
+    echo "↻ Provider '$provider' transient (exit $last_exit), trying '${next_provider:-none}'..." >&2
+  done
+
+  # All providers exhausted
+  echo "$last_output"
+  return "${last_exit:-1}"
+}
+
+# ============================================================================
 # Provider Execution
 # ============================================================================
 
