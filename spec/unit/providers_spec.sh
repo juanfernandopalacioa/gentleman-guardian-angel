@@ -675,39 +675,38 @@ EOF
   # ===========================================================================
 
   Describe 'parse_provider_list()'
+    # parse_provider_list writes into an array passed by nameref; it does NOT
+    # print to stdout. Assert the resulting array, not The output.
+
     It 'splits comma-separated list into ordered array'
       parse_provider_list "claude,gemini,ollama:llama3" _chain
-      The output should include "claude"
-      The output should include "gemini"
-      The output should include "ollama:llama3"
+      The value "${_chain[*]}" should eq "claude gemini ollama:llama3"
+      The value "${#_chain[@]}" should eq 3
     End
 
     It 'preserves per-provider :model suffix'
       parse_provider_list "ollama:llama3" _chain
-      The output should include "ollama:llama3"
+      The value "${_chain[*]}" should eq "ollama:llama3"
     End
 
     It 'ignores empty segments and trims whitespace'
       parse_provider_list "claude, ,gemini," _chain
-      The output should include "claude"
-      The output should include "gemini"
+      The value "${_chain[*]}" should eq "claude gemini"
     End
 
     It 'handles single provider (no comma)'
       parse_provider_list "claude" _chain
-      The output should include "claude"
+      The value "${_chain[*]}" should eq "claude"
     End
 
     It 'handles trailing comma gracefully'
       parse_provider_list "claude,gemini," _chain
-      The output should include "claude"
-      The output should include "gemini"
+      The value "${_chain[*]}" should eq "claude gemini"
     End
 
     It 'handles leading comma gracefully'
       parse_provider_list ",claude,gemini" _chain
-      The output should include "claude"
-      The output should include "gemini"
+      The value "${_chain[*]}" should eq "claude gemini"
     End
   End
 
@@ -840,151 +839,121 @@ EOF
   # ===========================================================================
 
   Describe 'execute_with_fallback()'
-    # Mock helpers for fallback tests
-    _fallback_validate_result=0
-    _fallback_execute_result=0
-    _fallback_execute_output=""
-    _fallback_classify_result="TRANSIENT"
-    _fallback_validate_call_count=0
-    _fallback_execute_call_count=0
-    _fallback_validate_call_order=""
-    _fallback_execute_call_order=""
-
-    reset_fallback_mocks() {
-      _fallback_validate_result=0
-      _fallback_execute_result=0
-      _fallback_execute_output=""
-      _fallback_classify_result="TRANSIENT"
-      _fallback_validate_call_count=0
-      _fallback_execute_call_count=0
-      _fallback_validate_call_order=""
-      _fallback_execute_call_order=""
-    }
+    # ShellSpec runs `When call` and every $(...) substitution in a subshell,
+    # so variable-based counters never survive. Mocks record calls on stderr
+    # (which IS captured) and decide behavior by provider name instead.
 
     validate_provider() {
-      _fallback_validate_call_count=$((_fallback_validate_call_count + 1))
-      _fallback_validate_call_order="${_fallback_validate_call_order} $1"
-      return "$_fallback_validate_result"
+      echo "mock-validate: $1" >&2
+      return 0
     }
 
+    # Default success mock; individual It blocks override with their own.
     execute_provider_with_timeout() {
-      _fallback_execute_call_count=$((_fallback_execute_call_count + 1))
-      _fallback_execute_call_order="${_fallback_execute_call_order} $1"
-      echo "$_fallback_execute_output"
-      return "$_fallback_execute_result"
+      echo "mock-execute: $1" >&2
+      echo "STATUS: PASSED"
+      return 0
     }
 
     classify_provider_error() {
-      echo "$_fallback_classify_result"
+      echo "TRANSIENT"
     }
 
     It 'stops on first success'
-      reset_fallback_mocks
       declare -a GGA_CHAIN=(claude gemini ollama:llama3)
-      _fallback_execute_result=0
-      _fallback_execute_output="STATUS: PASSED"
 
       When call execute_with_fallback "prompt" 300 GGA_CHAIN
       The output should eq "STATUS: PASSED"
       The status should be success
-      The variable _fallback_execute_call_count should eq 1
+      The stderr should include "mock-execute: claude"
+      The stderr should not include "mock-execute: gemini"
+      The stderr should not include "mock-execute: ollama:llama3"
     End
 
     It 'advances on TRANSIENT failure'
-      reset_fallback_mocks
       declare -a GGA_CHAIN=(claude gemini)
-      # First call returns TRANSIENT, second succeeds
-      _fallback_classify_result="TRANSIENT"
-      _fallback_execute_result=1
-      _fallback_execute_output=""
-      # We need a way to make the second call succeed
-      # Override execute_provider_with_timeout to use a counter
       execute_provider_with_timeout() {
-        _fallback_execute_call_count=$((_fallback_execute_call_count + 1))
-        _fallback_execute_call_order="${_fallback_execute_call_order} $1"
-        if [[ $_fallback_execute_call_count -eq 1 ]]; then
-          echo "timeout error"
-          return 124
-        else
-          echo "STATUS: PASSED from gemini"
-          return 0
-        fi
+        echo "mock-execute: $1" >&2
+        case "$1" in
+          claude) echo "timeout error"; return 124 ;;
+          gemini) echo "STATUS: PASSED from gemini"; return 0 ;;
+        esac
       }
 
       When call execute_with_fallback "prompt" 300 GGA_CHAIN
       The output should eq "STATUS: PASSED from gemini"
       The status should be success
-      The variable _fallback_execute_call_count should eq 2
+      The stderr should include "mock-execute: claude"
+      The stderr should include "mock-execute: gemini"
+      The stderr should include "trying"
     End
 
     It 'returns failure when all providers TRANSIENT-fail'
-      reset_fallback_mocks
       declare -a GGA_CHAIN=(claude gemini)
-      _fallback_classify_result="TRANSIENT"
       execute_provider_with_timeout() {
-        _fallback_execute_call_count=$((_fallback_execute_call_count + 1))
-        _fallback_execute_call_order="${_fallback_execute_call_order} $1"
+        echo "mock-execute: $1" >&2
         echo "error from $1"
         return 124
       }
 
       When call execute_with_fallback "prompt" 300 GGA_CHAIN
       The status should be failure
-      The variable _fallback_execute_call_count should eq 2
+      The output should include "error from gemini"
+      The stderr should include "mock-execute: claude"
+      The stderr should include "mock-execute: gemini"
+      The stderr should include "trying 'none'"
     End
 
     It 'hard-aborts on CONFIG error without trying next'
-      reset_fallback_mocks
       declare -a GGA_CHAIN=(claude gemini)
-      _fallback_classify_result="CONFIG"
+      classify_provider_error() {
+        echo "CONFIG"
+      }
       execute_provider_with_timeout() {
-        _fallback_execute_call_count=$((_fallback_execute_call_count + 1))
+        echo "mock-execute: $1" >&2
         echo "HTTP 403 Forbidden"
         return 1
       }
 
       When call execute_with_fallback "prompt" 300 GGA_CHAIN
       The status should be failure
-      The variable _fallback_execute_call_count should eq 1
+      The output should include "HTTP 403 Forbidden"
+      The stderr should include "config error"
+      The stderr should not include "mock-execute: gemini"
     End
 
     It 'validates each provider before executing'
-      reset_fallback_mocks
       declare -a GGA_CHAIN=(claude gemini)
-      _fallback_execute_result=0
-      _fallback_execute_output="STATUS: PASSED"
 
       When call execute_with_fallback "prompt" 300 GGA_CHAIN
-      The variable _fallback_validate_call_count should eq 1
+      The status should be success
+      The output should eq "STATUS: PASSED"
+      The stderr should include "mock-validate: claude"
+      The stderr should not include "mock-validate: gemini"
     End
 
     It 'handles single-provider chain (passthrough)'
-      reset_fallback_mocks
       declare -a GGA_CHAIN=(claude)
-      _fallback_execute_result=0
-      _fallback_execute_output="STATUS: PASSED"
 
       When call execute_with_fallback "prompt" 300 GGA_CHAIN
       The output should eq "STATUS: PASSED"
       The status should be success
-      The variable _fallback_execute_call_count should eq 1
+      The stderr should include "mock-execute: claude"
     End
 
     It 'logs transient fallback message to stderr'
-      reset_fallback_mocks
       declare -a GGA_CHAIN=(claude gemini)
       execute_provider_with_timeout() {
-        _fallback_execute_call_count=$((_fallback_execute_call_count + 1))
-        if [[ $_fallback_execute_call_count -eq 1 ]]; then
-          echo "timeout"
-          return 124
-        else
-          echo "STATUS: PASSED"
-          return 0
-        fi
+        echo "mock-execute: $1" >&2
+        case "$1" in
+          claude) echo "timeout"; return 124 ;;
+          gemini) echo "STATUS: PASSED"; return 0 ;;
+        esac
       }
 
       When call execute_with_fallback "prompt" 300 GGA_CHAIN
+      The status should be success
+      The output should eq "STATUS: PASSED"
       The stderr should include "claude"
       The stderr should include "trying"
     End
