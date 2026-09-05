@@ -932,6 +932,50 @@ EOF
       The stderr should not include "mock-validate: gemini"
     End
 
+    It 'advances when provider CLI is missing (validate returns 127)'
+      declare -a GGA_CHAIN=(claude gemini)
+      validate_provider() {
+        echo "mock-validate: $1" >&2
+        case "$1" in
+          claude) return 127 ;;
+          gemini) return 0 ;;
+        esac
+      }
+      execute_provider_with_timeout() {
+        echo "mock-execute: $1" >&2
+        echo "STATUS: PASSED from gemini"
+        return 0
+      }
+
+      When call execute_with_fallback "prompt" 300 GGA_CHAIN
+      The output should eq "STATUS: PASSED from gemini"
+      The status should be success
+      The stderr should include "mock-validate: claude"
+      The stderr should include "CLI not found"
+      The stderr should include "mock-execute: gemini"
+      The stderr should not include "mock-execute: claude"
+    End
+
+    It 'aborts on validation CONFIG failure without executing or advancing'
+      declare -a GGA_CHAIN=(claude gemini)
+      validate_provider() {
+        echo "mock-validate: $1" >&2
+        return 1
+      }
+      execute_provider_with_timeout() {
+        echo "mock-execute: $1" >&2
+        echo "STATUS: PASSED"
+        return 0
+      }
+
+      When call execute_with_fallback "prompt" 300 GGA_CHAIN
+      The status should be failure
+      The stderr should include "mock-validate: claude"
+      The stderr should include "CONFIG"
+      The stderr should not include "mock-execute: claude"
+      The stderr should not include "mock-execute: gemini"
+    End
+
     It 'handles single-provider chain (passthrough)'
       declare -a GGA_CHAIN=(claude)
 

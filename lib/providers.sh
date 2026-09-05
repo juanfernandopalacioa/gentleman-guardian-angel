@@ -25,6 +25,9 @@ NC='\033[0m'
 # Provider Validation
 # ============================================================================
 
+# Returns 0 when the provider is usable, 127 when a dependency (CLI/tool) is
+# missing (TRANSIENT — fallback chain should advance), 1 on configuration
+# errors (CONFIG — chain should abort).
 validate_provider() {
   local provider="$1"
   local base_provider="${provider%%:*}"
@@ -37,7 +40,7 @@ validate_provider() {
         echo "Install Claude Code CLI:"
         echo "  https://claude.ai/code"
         echo ""
-        return 1
+        return 127
       fi
       ;;
     gemini)
@@ -49,7 +52,7 @@ validate_provider() {
         echo "  # or"
         echo "  brew install gemini"
         echo ""
-        return 1
+        return 127
       fi
       ;;
     codex)
@@ -61,7 +64,7 @@ validate_provider() {
         echo "  # or"
         echo "  brew install --cask codex"
         echo ""
-        return 1
+        return 127
       fi
       ;;
     opencode)
@@ -71,7 +74,7 @@ validate_provider() {
         echo "Install OpenCode CLI:"
         echo "  https://opencode.ai"
         echo ""
-        return 1
+        return 127
       fi
       ;;
     cursor)
@@ -81,7 +84,7 @@ validate_provider() {
         echo "Install Cursor Agent CLI:"
         echo "  curl https://cursor.com/install -fsS | bash"
         echo ""
-        return 1
+        return 127
       fi
       ;;
     kilo)
@@ -91,7 +94,7 @@ validate_provider() {
         echo "Install Kilo CLI:"
         echo "  npm install -g @kilocode/cli"
         echo ""
-        return 1
+        return 127
       fi
       ;;
     kiro)
@@ -101,7 +104,7 @@ validate_provider() {
         echo "Install Kiro CLI:"
         echo "  https://kiro.dev/downloads/"
         echo ""
-        return 1
+        return 127
       fi
       local model="${provider#*:}"
       if [[ "$model" != "$provider" && -n "$model" ]]; then
@@ -121,7 +124,7 @@ validate_provider() {
         echo "  # or"
         echo "  brew install ollama"
         echo ""
-        return 1
+        return 127
       fi
       # Check if model is specified
       local model="${provider#*:}"
@@ -145,7 +148,7 @@ validate_provider() {
         echo "  # Ubuntu/Debian: sudo apt-get install curl"
         echo "  # macOS: brew install curl"
         echo ""
-        return 1
+        return 127
       fi
       ;;
     github)
@@ -160,7 +163,7 @@ validate_provider() {
         echo "Then authenticate:"
         echo "  gh auth login"
         echo ""
-        return 1
+        return 127
       fi
       # GitHub Models requires curl for API calls
       if ! command -v curl &> /dev/null; then
@@ -171,7 +174,7 @@ validate_provider() {
         echo "  # Ubuntu/Debian: sudo apt-get install curl"
         echo "  # macOS: brew install curl"
         echo ""
-        return 1
+        return 127
       fi
       # Model is required for GitHub Models
       local model="${provider#*:}"
@@ -209,14 +212,14 @@ validate_provider() {
         echo "  # Ubuntu/Debian: sudo apt-get install curl"
         echo "  # macOS: brew install curl"
         echo ""
-        return 1
+        return 127
       fi
       if ! command -v python3 &> /dev/null; then
         echo -e "${RED}❌ python3 not found${NC}"
         echo ""
         echo "MiniMax response parsing requires python3."
         echo ""
-        return 1
+        return 127
       fi
       ;;
     *)
@@ -332,8 +335,15 @@ execute_with_fallback() {
   for (( i=0; i<chain_len; i++ )); do
     provider="${_chain[$i]}"
 
-    # Validate before executing
-    if ! validate_provider "$provider"; then
+    # Validate before executing. A missing dependency (exit 127) is TRANSIENT
+    # and advances the chain; a configuration error (exit 1) aborts.
+    validate_provider "$provider"
+    local validate_exit=$?
+    if [[ $validate_exit -ne 0 ]]; then
+      if [[ $validate_exit -eq 127 ]]; then
+        echo "↻ Provider '$provider' CLI not found, trying next..." >&2
+        continue
+      fi
       echo "↻ Provider '$provider' validation failed (CONFIG), aborting." >&2
       return 1
     fi
